@@ -27,7 +27,7 @@ class PathState(Enum):
 
 class FrontLoader:
     def __init__(self, x, y):
-        # Basic dimensions and properties from previous code
+        # Basic dimensions and properties
         self.front_length = 100
         self.rear_length = 100
         self.width = 40
