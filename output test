@@ -11,12 +11,18 @@ class Channels(Enum):
     ACTIVATE = 5    # Channel 6
 
 class IBusController:
-    def __init__(self, port='/dev/ttyUSB0', baudrate=115200):
-        self.serial = serial.Serial(port, baudrate)
+    def __init__(self, baudrate=115200):
+        # Use UART port on Raspberry Pi
+        self.serial = serial.Serial(
+            port='/dev/ttyAMA0',  # Hardware UART port
+            baudrate=baudrate,
+            timeout=1,
+            write_timeout=1
+        )
         self.channel_values = [1500] * 14  # Initialize all channels to center position
         self.is_pump_active = False
         self.is_movement_activated = False
-    
+
     def _checksum(self, data):
         """Calculate iBUS checksum"""
         total = 0
@@ -77,16 +83,64 @@ class IBusController:
 
     def send_command(self):
         """Send the current channel values via iBUS"""
-        packet = self._create_ibus_packet()
-        self.serial.write(packet)
-        time.sleep(0.02)  # 50Hz update rate
+        try:
+            packet = self._create_ibus_packet()
+            self.serial.write(packet)
+            time.sleep(0.02)  # 50Hz update rate
+        except serial.SerialException as e:
+            print(f"Error sending command: {str(e)}")
+            raise
 
-def main():
-    # Example usage: Turn left
-    controller = IBusController()
+def setup_raspberry_pi():
+    """Configure Raspberry Pi for UART communication"""
+    import subprocess
+    
+    # Disable Bluetooth to free up UART
+    print("Configuring Raspberry Pi UART...")
+    
+    # Add these lines to /boot/config.txt if not present
+    config_lines = [
+        "dtoverlay=disable-bt",
+        "enable_uart=1"
+    ]
     
     try:
-        # Activate systems in correct order
+        with open('/boot/config.txt', 'r') as f:
+            current_config = f.read()
+            
+        needs_update = False
+        for line in config_lines:
+            if line not in current_config:
+                needs_update = True
+                break
+        
+        if needs_update:
+            print("Updating /boot/config.txt...")
+            with open('/boot/config.txt', 'a') as f:
+                f.write('\n# Added for iBUS communication\n')
+                for line in config_lines:
+                    f.write(line + '\n')
+            print("Configuration updated. Please reboot your Raspberry Pi.")
+            return False
+            
+    except Exception as e:
+        print(f"Error updating configuration: {e}")
+        return False
+        
+    return True
+
+def main():
+    # Check if Raspberry Pi is properly configured
+    if not setup_raspberry_pi():
+        return
+        
+    try:
+        print("Initializing IBus Controller...")
+        controller = IBusController()
+        
+        print("Testing connection...")
+        controller.send_command()  # Test if we can send commands
+        
         print("Activating movement system...")
         controller.activate_movement()
         
@@ -111,7 +165,8 @@ def main():
     except Exception as e:
         print(f"Error: {e}")
     finally:
-        controller.serial.close()
+        if 'controller' in locals() and hasattr(controller, 'serial'):
+            controller.serial.close()
 
 if __name__ == "__main__":
     main()
