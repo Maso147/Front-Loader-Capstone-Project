@@ -1,0 +1,155 @@
+import serial
+import serial.tools.list_ports
+import time
+from enum import Enum
+
+class Channels(Enum):
+    TURN = 0        # Channel 1
+    MOVEMENT = 1    # Channel 2
+    ARM = 2         # Channel 3
+    BUCKET = 3      # Channel 4
+    PUMP = 4        # Channel 5
+    ACTIVATE = 5    # Channel 6
+
+class IBusController:
+    def __init__(self, port=None, baudrate=115200):
+        self.channel_values = [1500] * 14  # Initialize all channels to center position
+        self.is_pump_active = False
+        self.is_movement_activated = False
+        
+        # If no port specified, try to find the correct port
+        if port is None:
+            port = self._find_serial_port()
+            
+        if port is None:
+            raise Exception("No suitable serial port found. Please check your USB connection.")
+            
+        try:
+            self.serial = serial.Serial(
+                port=port,
+                baudrate=baudrate,
+                timeout=1,
+                write_timeout=1
+            )
+        except serial.SerialException as e:
+            raise Exception(f"Failed to open serial port {port}: {str(e)}")
+
+    def _find_serial_port(self):
+        """Attempt to find the correct serial port"""
+        print("Available serial ports:")
+        ports = list(serial.tools.list_ports.comports())
+        
+        for port in ports:
+            print(f"Found port: {port.device} - {port.description}")
+            # You might want to add specific criteria here to identify your USB-Serial adapter
+            if "USB" in port.description.upper():
+                return port.device
+                
+        return None
+
+    def _checksum(self, data):
+        """Calculate iBUS checksum"""
+        total = 0
+        for i in range(0, 30):
+            total += data[i]
+        checksum = 0xFFFF - total
+        return checksum & 0xFF, (checksum >> 8) & 0xFF
+
+    def _create_ibus_packet(self):
+        """Create an iBUS packet with current channel values"""
+        packet = bytearray([0x20, 0x40])  # iBUS protocol header
+        
+        # Add channel data (14 channels, 2 bytes each)
+        for value in self.channel_values:
+            packet.extend([value & 0xFF, (value >> 8) & 0xFF])
+            
+        # Add checksum
+        chk1, chk2 = self._checksum(packet)
+        packet.extend([chk1, chk2])
+        
+        return packet
+
+    def set_channel_value(self, channel, value):
+        """Set a channel value (1000-2000)"""
+        value = max(1000, min(2000, value))  # Constrain value
+        self.channel_values[channel] = value
+
+    def activate_pump(self):
+        """Activate the hydraulic pump"""
+        self.set_channel_value(Channels.PUMP.value, 2000)  # High value to activate
+        self.is_pump_active = True
+        time.sleep(0.5)  # Allow pump to build pressure
+
+    def deactivate_pump(self):
+        """Deactivate the hydraulic pump"""
+        self.set_channel_value(Channels.PUMP.value, 1000)  # Low value to deactivate
+        self.is_pump_active = False
+
+    def activate_movement(self):
+        """Activate movement system"""
+        self.set_channel_value(Channels.ACTIVATE.value, 2000)  # High value to activate
+        self.is_movement_activated = True
+        time.sleep(0.2)  # Allow system to activate
+
+    def deactivate_movement(self):
+        """Deactivate movement system"""
+        self.set_channel_value(Channels.ACTIVATE.value, 1000)  # Low value to deactivate
+        self.is_movement_activated = False
+
+    def turn_left(self, turn_speed=1750):
+        """Execute a left turn"""
+        if not self.is_pump_active:
+            print("Cannot turn: Pump not active")
+            return False
+            
+        self.set_channel_value(Channels.TURN.value, turn_speed)
+        return True
+
+    def send_command(self):
+        """Send the current channel values via iBUS"""
+        try:
+            packet = self._create_ibus_packet()
+            self.serial.write(packet)
+            time.sleep(0.02)  # 50Hz update rate
+        except serial.SerialException as e:
+            print(f"Error sending command: {str(e)}")
+            raise
+
+def main():
+    try:
+        # Create controller instance - it will automatically find the correct port
+        print("Initializing IBus Controller...")
+        controller = IBusController()
+        
+        print("Testing connection...")
+        controller.send_command()  # Test if we can send commands
+        
+        print("Activating movement system...")
+        controller.activate_movement()
+        
+        print("Activating hydraulic pump...")
+        controller.activate_pump()
+        
+        print("Executing left turn...")
+        if controller.turn_left():
+            # Send the command multiple times to ensure smooth movement
+            for _ in range(10):
+                controller.send_command()
+                time.sleep(0.02)
+        
+        # Reset turn channel to center
+        controller.set_channel_value(Channels.TURN.value, 1500)
+        controller.send_command()
+        
+        # Cleanup
+        controller.deactivate_pump()
+        controller.deactivate_movement()
+        
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        if 'controller' in locals() and hasattr(controller, 'serial'):
+            controller.serial.close()
+
+if __name__ == "__main__":
+    main()
