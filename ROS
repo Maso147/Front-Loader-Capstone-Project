@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist
+from std_msgs.msg import Float32
+import serial
+import time
+import struct
+
+class FrontLoaderController(Node):
+    """
+    ROS2 node for controlling an RC hydraulic front loader via a Pololu Mini Maestro 18.
+    
+    Channel mapping:
+    - Channel 0: Turning
+    - Channel 1: Movement (forward/backward)
+    - Channel 2: Arm (up/down)
+    - Channel 3: Bucket (dump/scoop)
+    - Channel 4: Pump
+    """
+    
+    def __init__(self):
+        super().__init__('front_loader_controller')
+        
+        # Parameters (can be overridden via launch file)
+        self.declare_parameter('serial_port', '/dev/ttyACM0')
+        self.declare_parameter('baudrate', 9600)
+        self.declare_parameter('min_pulse_width', 1000)  # Microseconds
+        self.declare_parameter('max_pulse_width', 2000)  # Microseconds
+        self.declare_parameter('center_pulse_width', 1500)  # Microseconds
+        
+        # Set up servo controller connection
+        port = self.get_parameter('serial_port').value
+        baud = self.get_parameter('baudrate').value
+        
+        self.get_logger().info(f'Connecting to Mini Maestro on {port} at {baud} baud')
+        
+        try:
+            self.servo = serial.Serial(port, baud, timeout=1)
+            self.get_logger().info('Connected to Mini Maestro')
+        except serial.SerialException as e:
+            self.get_logger().error(f'Failed to connect to Mini Maestro: {e}')
+            raise
+        
+        # Set default positions
+        self.min_pulse = self.get_parameter('min_pulse_width').value
+        self.max_pulse = self.get_parameter('max_pulse_width').value
+        self.center_pulse = self.get_parameter('center_pulse_width').value
+        
+        # Initialize positions to center/neutral
+        for channel in range(5):
+            self.set_target(channel, self.center_pulse)
+            time.sleep(0.05)  # Small delay between commands
+        
+        # Subscribe to topics for controlling the loader
+        self.movement_sub = self.create_subscription(
+            Twist, 
+            'cmd_vel', 
+            self.cmd_vel_callback, 
+            10)
+            
+        self.arm_sub = self.create_subscription(
+            Float32,
+            'arm_control',
+            self.arm_callback,
+            10)
+            
+        self.bucket_sub = self.create_subscription(
+            Float32,
+            'bucket_control',
+            self.bucket_callback,
+            10)
+            
+        self.pump_sub = self.create_subscription(
+            Float32,
+            'pump_control',
+            self.pump_callback,
+            10)
+            
+        self.get_logger().info('Front loader controller initialized and ready')
+    
+    def set_target(self, channel, target):
+        """
+        Send a command to the Pololu Mini Maestro to set a target position.
+        
+        Args:
+            channel (int): Channel number (0-17)
+            target (int): Target position in microseconds (typically 1000-2000)
+        """
+        # Limit the target to valid range
+        target = max(self.min_pulse, min(self.max_pulse, target))
+        
+        # Convert from microseconds to quarter-microseconds (what the Maestro uses)
+        target_qus = int(target * 4)
+        
+        # Compact protocol command for "Set Target"
+        # 0x84 + channel, target low byte, target high byte
+        command = bytes([0x84 + channel, target_qus & 0x7F, (target_qus >> 7) & 0x7F])
+        
+        try:
+            self.servo.write(command)
+        except serial.SerialException as e:
+            self.get_logger().error(f'Failed to send command to channel {channel}: {e}')
+    
+    def map_value(self, value, in_min, in_max, out_min, out_max):
+        """Map a value from one range to another."""
+        return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+    
+    def cmd_vel_callback(self, msg):
+        """
+        Handle movement commands from cmd_vel.
+        
+        Linear.x: Forward/backward movement (channel 1)
+        Angular.z: Turning (channel 0)
+        """
+        # Map the linear velocity (-1.0 to 1.0) to servo pulse width
+        forward_value = self.map_value(
+            msg.linear.x, 
+            -1.0, 1.0, 
+            self.min_pulse, self.max_pulse
+        )
+        self.set_target(1, int(forward_value))
+        
+        # Map the angular velocity (-1.0 to 1.0) to servo pulse width
+        turn_value = self.map_value(
+            msg.angular.z, 
+            -1.0, 1.0, 
+            self.min_pulse, self.max_pulse
+        )
+        self.set_target(0, int(turn_value))
+        
+        self.get_logger().debug(f'Movement updated: linear={msg.linear.x}, angular={msg.angular.z}')
+    
+    def arm_callback(self, msg):
+        """
+        Handle arm up/down commands.
+        
+        Value 0.0 = all the way down
+        Value 1.0 = all the way up
+        """
+        arm_value = self.map_value(
+            msg.data,
+            0.0, 1.0,
+            self.min_pulse, self.max_pulse
+        )
+        self.set_target(2, int(arm_value))
+        self.get_logger().debug(f'Arm position updated: {msg.data}')
+    
+    def bucket_callback(self, msg):
+        """
+        Handle bucket tilt commands.
+        
+        Value 0.0 = dumped
+        Value 1.0 = scooped
+        """
+        bucket_value = self.map_value(
+            msg.data,
+            0.0, 1.0,
+            self.min_pulse, self.max_pulse
+        )
+        self.set_target(3, int(bucket_value))
+        self.get_logger().debug(f'Bucket position updated: {msg.data}')
+    
+    def pump_callback(self, msg):
+        """
+        Handle hydraulic pump control.
+        
+        Value 0.0 = off
+        Value 1.0 = max power
+        """
+        pump_value = self.map_value(
+            msg.data,
+            0.0, 1.0,
+            self.min_pulse, self.max_pulse
+        )
+        self.set_target(4, int(pump_value))
+        self.get_logger().debug(f'Pump power updated: {msg.data}')
+
+def main(args=None):
+    rclpy.init(args=args)
+    controller = FrontLoaderController()
+    
+    try:
+        rclpy.spin(controller)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Set all servos to center position before exiting
+        for channel in range(5):
+            controller.set_target(channel, controller.center_pulse)
+        
+        controller.get_logger().info('Shutdown - all servos reset to neutral position')
+        controller.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
