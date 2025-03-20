@@ -1,0 +1,63 @@
+from launch import LaunchDescription
+from launch_ros.actions import Node
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+
+def generate_launch_description():
+    """
+    Launch file for the front loader controller node.
+    """
+    # Launch arguments
+    serial_port_arg = DeclareLaunchArgument(
+        'serial_port',
+        default_value='/dev/ttyACM0',
+        description='Serial port for the Pololu Mini Maestro'
+    )
+    
+    baudrate_arg = DeclareLaunchArgument(
+        'baudrate',
+        default_value='9600',
+        description='Baud rate for serial communication'
+    )
+    
+    min_pulse_arg = DeclareLaunchArgument(
+        'min_pulse_width',
+        default_value='1000',
+        description='Minimum pulse width in microseconds'
+    )
+    
+    max_pulse_arg = DeclareLaunchArgument(
+        'max_pulse_width',
+        default_value='2000',
+        description='Maximum pulse width in microseconds'
+    )
+    
+    center_pulse_arg = DeclareLaunchArgument(
+        'center_pulse_width',
+        default_value='1500',
+        description='Center/neutral pulse width in microseconds'
+    )
+    
+    # Front loader controller node
+    front_loader_node = Node(
+        package='front_loader_control',
+        executable='front_loader_controller',
+        name='front_loader_controller',
+        parameters=[{
+            'serial_port': LaunchConfiguration('serial_port'),
+            'baudrate': LaunchConfiguration('baudrate'),
+            'min_pulse_width': LaunchConfiguration('min_pulse_width'),
+            'max_pulse_width': LaunchConfiguration('max_pulse_width'),
+            'center_pulse_width': LaunchConfiguration('center_pulse_width'),
+        }],
+        output='screen'
+    )
+    
+    return LaunchDescription([
+        serial_port_arg,
+        baudrate_arg,
+        min_pulse_arg,
+        max_pulse_arg,
+        center_pulse_arg,
+        front_loader_node
+    ])
